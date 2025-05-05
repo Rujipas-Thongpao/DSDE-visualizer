@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import pydeck as pdk
+from sklearn.cluster import DBSCAN
 
 st.title('DSDE visualization')
 
@@ -10,7 +11,7 @@ DATA_PATH= './data/full_col.csv'
 @st.cache_data
 def load_data(nrows=None):
     data = pd.read_csv(DATA_PATH, nrows=nrows)
-    data[['lon', 'lat']] = data['coords'].str.split(',', expand=True).astype(float)
+    data[['lon', 'lat']] = data['coords'].str.split(',', expand=True).astype(float) # convert lon lat to latitude and longitude
     return data
 
 # Load data
@@ -34,7 +35,6 @@ data = data[(data['timestamp'] >= start_dt) & (data['timestamp'] < end_dt)]
 # =============================
 
 ## COLOR STATE
-
 state_select = st.sidebar.selectbox(
     'Select State to Filter',
     options=['ทั้งหมด','เสร็จสิ้น', 'กำลังดำเนินการ', 'รอรับเรื่อง'],
@@ -57,7 +57,6 @@ data['color'] = data['state'].apply(lambda state: color_map.get(state, [0, 0, 0]
 # =============================
 
 ## SELECT BY TYPE ==========
-
 import ast
 def parse_set_string(s):
     try:
@@ -78,12 +77,10 @@ type_select = st.sidebar.selectbox(
 
 if(type_select != 'ทั้งหมด'):
     data = data[data['type_list'].apply(lambda x: type_select in x)]
-
 ## ===================================
 
 
 ## SELECT BY DISTRICT ==========
-
 district = data['district'].unique().tolist()
 district.pop(0);
 district.insert(0, 'ทั้งหมด')
@@ -116,13 +113,34 @@ if st.checkbox('Show raw data'):
     st.write(data)
 
 
+# Display Histogram of ticket counts by type
+st.subheader('Ticket Counts by Type')
+
+type_list_chart = ['ความสะอาด', 'ร้องเรียน' ,'น้ำท่วม' ,'สะพาน' ,'ถนน' ,'ท่อระบายน้ำ' ,'ทางเท้า','จราจร', 'แสงสว่าง' ,'กีดขวาง' ,'เสียงรบกวน' ,'สายไฟ' ,'คลอง' ,'ความปลอดภัย','สัตว์จรจัด' ,'ต้นไม้' ,'การเดินทาง' ,'เสนอแนะ' ,'คนจรจัด']
+count = [0] * len(type_list_chart)
+for type_list in data['type_list']:
+    for t in type_list:
+        if t in type_list_chart:
+            count[type_list_chart.index(t)] += 1
+
+chart = pd.DataFrame({
+    'Type': type_list_chart,
+    'Count': count  
+    }
+)
+
+st.bar_chart(chart.set_index('Type'))
+
 
 # Map visualization options
-map_type = st.radio('Select Map Type', ['Points', 'Heatmap'])
+map_type = st.radio('Select Map Type', ['Points', 'Heatmap', 'Cluster'])
 
 # Calculate map center
 center_lat = data['lat'].mean()
 center_lon = data['lon'].mean()
+
+
+
 
 # Create map layers based on selection
 def create_map_layers(data, map_type):
@@ -138,7 +156,7 @@ def create_map_layers(data, map_type):
                 pickable=True
             )
         ]
-    else:
+    elif map_type == 'Heatmap':
         return [
             pdk.Layer(
                 "HeatmapLayer",
@@ -148,7 +166,55 @@ def create_map_layers(data, map_type):
                 radiusPixels=50,
             )
         ]
+    elif map_type == 'Cluster':
+        # Clustering using DBSCAN
+        coords_rad = np.radians(data[['lat', 'lon']].values)
 
+        # Apply DBSCAN with haversine metric
+        kms_per_radian = 6371.0088  # Earth's radius
+        eps_km = .3  # set this to the distance you consider as "close" (e.g., 2 km)
+
+        eps_km = st.slider(
+            'Select Distance (km)',
+            min_value=0.1,
+            max_value=1.0,
+            value=0.3,
+        )
+        min_samples = st.slider(
+            'Select Minimum Samples',
+            min_value=1,
+            max_value=10,
+            value=2,
+        )
+        cluster = DBSCAN(
+            eps=eps_km / kms_per_radian,  # epsilon in radians
+            min_samples=min_samples,
+            algorithm='ball_tree',
+            metric='haversine'
+        ).fit_predict(coords_rad)
+
+        data['cluster'] = cluster
+
+        label_colors = {}
+        for label in np.unique(cluster):
+            if label == -1:
+                # Noise is gray
+                label_colors[label] = (160, 160, 160)
+            else:
+                # Random bright color
+                label_colors[label] = tuple(np.random.randint(50, 255) for _ in range(3))
+        data['cluster_color'] = data['cluster'].map(label_colors)
+        return [
+            pdk.Layer(
+                "ScatterplotLayer",
+                data,
+                get_position="[lon, lat]",
+                get_color='cluster_color',
+                get_radius=50,
+                opacity=0.8,
+                pickable=True
+            )
+        ]
 
 tooltip = {
     "html": """
@@ -189,5 +255,8 @@ df_time['date'] = df_time['timestamp'].dt.date
 counts = df_time.groupby(['date', 'state']).size().unstack(fill_value=0)
 
 st.line_chart(counts)
+
+
+
 
 
